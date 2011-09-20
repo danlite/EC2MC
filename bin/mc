@@ -1,0 +1,202 @@
+#!/bin/bash
+
+DEFAULT_BACKUP_MODE={{BACKUP_MODE}} # options: 'local' or 's3'
+MC_PATH=/home/ec2-user/minecraft
+SCREEN_NAME="minecraft-screen"
+S3_BUCKET_NAME="{{BUCKET_NAME}}"
+LOCAL_BACKUP_PATH="$MC_PATH/backups"
+TIMESTAMP_FORMAT="%y.%m.%d-%H.%M.%S"
+
+
+if [[ $DEFAULT_BACKUP_MODE = "s3" ]]; then
+  LOCAL_BACKUP=0
+elif [[ $DEFAULT_BACKUP_MODE = "local" ]]; then
+  LOCAL_BACKUP=1
+fi
+
+if [ -e $MC_PATH/server.log.lck ]
+  then
+  ONLINE=1
+else
+  ONLINE=0
+fi
+
+function send_screen_command {
+  screen -x $SCREEN_NAME -p 0 -X stuff "`printf "$1\r"`"
+}
+
+function run_ec2_user_cmd {
+  if [[ $USER = 'ec2-user' ]]; then
+    $1
+  else
+    cmd="'$1'"
+    eval su - ec2-user -c $cmd
+  fi
+}
+
+server_status() {
+  if [ $ONLINE -eq 1 ]
+    then
+    echo "Minecraft server seems ONLINE."
+  else
+    echo "Minecraft server seems OFFLINE."
+  fi
+}
+
+display() {
+  screen -r ec2-user/$SCREEN_NAME
+}
+
+if [ $# -gt 0 ]
+  then
+  case $1 in
+    "sc")
+    shift
+    send_screen_command $@
+    ;;
+    
+    "status")
+    server_status;;
+    
+    "console")
+    display;;
+    
+    "start")
+    if [ $ONLINE -eq 1 ]
+      then
+      echo "Server seems to be already running!"
+    else
+      run_ec2_user_cmd "screen -dmS $SCREEN_NAME startup-mc"
+    fi;;
+    
+    "stop")
+    if [ $ONLINE -eq 1 ]
+      then
+      echo "Stopping Minecraft server..."
+      run_ec2_user_cmd 'mc sc stop'
+      sleep 5 # necessary to allow chunks to be saved
+      run_ec2_user_cmd 'mc backup'
+    else
+      echo "Server seems to be offline."
+    fi;;
+    
+    "list")
+    if [ $ONLINE -eq 1 ]
+      then
+      run_ec2_user_cmd 'mc sc list'
+      sleep 1 # necessary to allow output to be written to log
+      TOKEN="Connected players: "
+      OUTPUT=`tail -1 $MC_PATH/server.log | grep "$TOKEN"`
+
+      if [ ${#OUTPUT} -eq 0 ]
+        then
+        exit 1
+      fi
+
+      PLAYER_LIST=`echo $OUTPUT | grep "$TOKEN" | sed "s/.*$TOKEN\(.*\)/\1/"`
+      echo $PLAYER_LIST
+    fi;;
+    
+    "backup")
+    if [ $ONLINE -eq 1 ]; then
+      run_ec2_user_cmd 'mc sc save-off'
+      sleep 1
+    fi
+
+    FORCE_BACKUP=0
+
+    shift
+    for arg in "$@"
+    do
+      if [[ $arg = "--force" ]]; then FORCE_BACKUP=1
+      elif [[ $arg = "--local" ]]; then LOCAL_BACKUP=1
+      elif [[ $arg = "--s3" ]]; then LOCAL_BACKUP=0
+      fi
+    done
+
+    UPDATE_FILE="$MC_PATH/.last_update"
+    PREVIOUS_BACKUP_MD5=`cat "$MC_PATH/.backup_md5"`
+    LAST_UPDATE=`ls -la --time-style=long-iso $UPDATE_FILE 2>/dev/null | awk '{ print $6 }'`
+    TODAY=`date --rfc-3339=date`
+    TIMESTAMP=`date +"$TIMESTAMP_FORMAT"`
+
+    if [[ $LAST_UPDATE = $TODAY && $FORCE_BACKUP = 0 ]]; then
+      echo "Already backed up today."
+      exit 0
+    fi
+    
+    BACKUP_MD5=`md5sum "$MC_PATH/world/level.dat"`
+    
+    if [[ $BACKUP_MD5 = $PREVIOUS_BACKUP_MD5 && $FORCE_BACKUP = 0 ]]; then
+      echo "No changes since previous backup."
+      exit 0
+    fi
+    
+    echo $BACKUP_MD5 > "$MC_PATH/.backup_md5"
+
+    if [[ $LOCAL_BACKUP = 1 ]]; then
+      MAP_ARGS="--local"
+    fi
+    run_ec2_user_cmd "mc map $MAP_ARGS"
+
+    PROPERTY="level-name"; LEVEL_NAME=`cat $MC_PATH/server.properties | grep $PROPERTY | sed "s/$PROPERTY=\(.*\)/\1/"`
+
+    echo "Backing up $LEVEL_NAME..."
+    ZIP_FILENAME="$LEVEL_NAME-$TIMESTAMP.tar.gz"
+    TEMP_ZIP_PATH="/tmp/mc_backup_tar_gz"
+    cd $MC_PATH
+    tar -zcvf "$TEMP_ZIP_PATH" "$LEVEL_NAME"
+
+    if [[ $LOCAL_BACKUP = 1 ]]; then
+      mkdir -p "$LOCAL_BACKUP_PATH"
+      cp "$TEMP_ZIP_PATH" "$LOCAL_BACKUP_PATH/$ZIP_FILENAME"
+    else
+      s3cmd put "$TEMP_ZIP_PATH" "s3://$S3_BUCKET_NAME/$ZIP_FILENAME"
+    fi
+
+    touch "$UPDATE_FILE"
+
+    if [ $ONLINE -eq 1 ]; then
+      run_ec2_user_cmd 'mc sc save-on'
+    fi;;
+    
+    "map")
+    # c10t hangs on 32-bit EC2 instance...
+    exit 1
+    
+    TIMESTAMP=`date +"$TIMESTAMP_FORMAT"`
+
+    PROPERTY="level-name"; LEVEL_NAME=`cat $MC_PATH/server.properties | grep $PROPERTY | sed "s/$PROPERTY=\(.*\)/\1/"`
+
+    echo "Constructing map of $LEVEL_NAME..."
+    TEMP_PATH="/tmp/mc_map_png"
+
+    c10t --no-log -z -M 500 -w "$MC_PATH/$LEVEL_NAME" -o "$TEMP_PATH"
+
+    FILENAME="map-$TIMESTAMP.png"
+    
+    shift
+    for arg in "$@"
+    do
+      if [[ $arg = "--local" ]]; then LOCAL_BACKUP=1
+      elif [[ $arg = "--s3" ]]; then LOCAL_BACKUP=0
+      fi
+    done
+
+    if [[ $LOCAL_BACKUP = 1 ]]; then
+      mkdir -p "$LOCAL_BACKUP_PATH"
+      cp "$TEMP_PATH" "$LOCAL_BACKUP_PATH/$FILENAME"
+    else
+      s3cmd put "$TEMP_PATH" "s3://$S3_BUCKET_NAME/$FILENAME"
+    fi;;
+    *)
+    echo "Usage: $0 <status | start | stop | console | list | backup | map>"
+  esac
+else
+  if [ $ONLINE -eq 1 ]
+    then
+    display
+  else
+    echo "Minecraft server seems to be offline..."
+  fi
+fi

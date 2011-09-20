@@ -1,0 +1,1 @@
+*/10 * * * * root /home/ec2-user/bin/idle-mc-shutdown

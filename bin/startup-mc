@@ -1,0 +1,4 @@
+#!/bin/bash
+
+cd /home/ec2-user/minecraft
+java -Xmx1024M -jar minecraft_server.jar # CraftBukkit.jar

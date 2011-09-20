@@ -1,0 +1,37 @@
+#!/bin/bash
+# To be run as root in the system crontab
+
+# Abort if user specifically asks to stay alive
+if [ -e /home/ec2-user/stayalive ]
+then
+	exit 0
+fi
+
+# Check if user has a terminal session open
+ps -U ec2-user | grep bash > /dev/null
+CHECK_USER_SESSION=$?
+
+# Abort if user has terminal session and isn't asking to be killed
+if [ $CHECK_USER_SESSION -eq 0 -a ! -e /home/ec2-user/killme ]; then
+	exit 0
+fi
+
+LOG_FILE=/home/ec2-user/shutdown.log
+PLAYER_LIST=`/home/ec2-user/bin/mc list`
+PLAYER_LIST_ERROR=$?
+
+# Got a player list
+if [[ $PLAYER_LIST_ERROR -eq 0 ]]; then
+  
+  # Player list is empty
+	if [[ ${#PLAYER_LIST} -eq 0 ]]; then
+		/home/ec2-user/bin/mc stop
+		rm -f /home/ec2-user/killme
+		echo "`date` - No players online, shutting down." >> $LOG_FILE
+		/sbin/shutdown -P now
+	else
+		echo "`date` - Players online: $PLAYER_LIST. Not shutting down." >> $LOG_FILE
+	fi
+else
+	echo "`date` - Unable to determine player list. Not shutting down." >> $LOG_FILE
+fi
