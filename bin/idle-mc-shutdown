@@ -1,6 +1,11 @@
 #!/bin/bash
 # To be run as root in the system crontab
 
+if [ `minutes-since-boot` -lt 10 ]
+then
+	exit 0
+fi
+
 # Abort if user specifically asks to stay alive
 if [ -e /home/ec2-user/stayalive ]
 then

@@ -1,0 +1,7 @@
+#!/usr/bin/ruby
+
+c = `last | grep reboot | head -1`
+r = c.match /(\d{2}):(\d{2})\)/
+hours, minutes = r[1].to_i, r[2].to_i
+
+puts hours * 60 + minutes
